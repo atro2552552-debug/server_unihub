@@ -6,9 +6,44 @@ import { ObjectId } from 'mongodb';
 import getFilesCollection from '../models/File.js';
 import getSubjectsCollection from '../models/Subject.js';
 import getUsers from '../models/User.js';
-import { uploadSupabaseObject, downloadSupabaseObject, deleteSupabaseObject } from '../config/supabaseStorage.js';
+import { uploadSupabaseObject, createSupabaseUploadUrl, getSupabaseObjectInfo, getSupabaseObjectPrefix, downloadSupabaseObject, deleteSupabaseObject } from '../config/supabaseStorage.js';
 
 const currentDir = path.dirname(fileURLToPath(import.meta.url));
+const MAX_FILE_SIZE = 50_000_000;
+const ALLOWED_FILE_EXTENSIONS = new Set(['.pdf', '.doc', '.docx', '.ppt', '.pptx']);
+
+function validateUploadDetails(body, userId) {
+  const title = String(body.title || '').trim();
+  const originalName = path.basename(String(body.originalName || '').replaceAll('\\', '/')).trim();
+  const subject = String(body.subject || '');
+  const resourceType = body.resourceType || 'file';
+  const size = Number(body.size);
+  const mimeType = String(body.mimeType || 'application/octet-stream').slice(0, 150);
+  const extension = path.extname(originalName).toLowerCase();
+
+  if (!title || title.length > 180 || !originalName || originalName.length > 240) {
+    return { error: 'اسم الملف والمادة مطلوبين.' };
+  }
+  if (!['file', 'summary'].includes(resourceType)) return { error: 'نوع المحتوى غير صالح.' };
+  if (!Number.isSafeInteger(size) || size < 1 || size > MAX_FILE_SIZE) {
+    return { error: 'حجم الملف لازم يكون أقل من 50 ميجابايت.' };
+  }
+  if (!ALLOWED_FILE_EXTENSIONS.has(extension)) {
+    return { error: 'نوع الملف مش مدعوم. استخدم PDF أو Word أو PowerPoint.' };
+  }
+  if (resourceType === 'summary' && extension !== '.pdf') {
+    return { error: 'الملخص لازم يكون ملف PDF صالح.' };
+  }
+  if (!ObjectId.isValid(subject) || !ObjectId.isValid(userId)) {
+    return { error: 'المادة أو الحساب مش صالح.' };
+  }
+
+  return { value: { title, originalName, subject, resourceType, size, mimeType, extension } };
+}
+
+function isValidUploadKey(key) {
+  return typeof key === 'string' && /^course-files\/[0-9a-f-]{36}\.(pdf|doc|docx|ppt|pptx)$/i.test(key);
+}
 
 function getDisplayName(file) {
   const extension = path.extname(file.originalName || '');
@@ -93,6 +128,108 @@ async function uploadFile(req, res) {
   }
 }
 
+async function createFileUploadUrl(req, res) {
+  const validated = validateUploadDetails(req.body || {}, req.userId);
+  if (validated.error) return res.status(400).json({ message: validated.error });
+
+  try {
+    const { extension } = validated.value;
+    const storageKey = `course-files/${randomUUID()}${extension}`;
+    const signedUpload = await createSupabaseUploadUrl(storageKey);
+    return res.status(201).json({ uploadUrl: signedUpload.signedUrl, storageKey });
+  } catch (error) {
+    if (error.code === 'SUPABASE_STORAGE_NOT_CONFIGURED') {
+      return res.status(503).json({ message: 'تخزين Supabase مش متظبط على السيرفر. أضف إعدادات Supabase وحاول تاني.' });
+    }
+    console.error('Could not prepare cloud file upload:', error);
+    return res.status(502).json({ message: 'مقدرناش نجهز رفع الملف للتخزين السحابي. حاول تاني.' });
+  }
+}
+
+async function completeFileUpload(req, res) {
+  const validated = validateUploadDetails(req.body || {}, req.userId);
+  if (validated.error) return res.status(400).json({ message: validated.error });
+
+  const { storageKey } = req.body || {};
+  if (!isValidUploadKey(storageKey) || !storageKey.toLowerCase().endsWith(validated.value.extension)) {
+    return res.status(400).json({ message: 'بيانات الملف المرفوع مش صالحة.' });
+  }
+
+  try {
+    const objectInfo = await getSupabaseObjectInfo(storageKey);
+    const metadataSize = Number(objectInfo?.metadata?.size ?? objectInfo?.size);
+    if (Number.isFinite(metadataSize) && metadataSize !== validated.value.size) {
+      await deleteSupabaseObject(storageKey).catch(() => {});
+      return res.status(400).json({ message: 'حجم الملف المرفوع مش مطابق للملف المختار.' });
+    }
+    if (metadataSize > MAX_FILE_SIZE) {
+      await deleteSupabaseObject(storageKey).catch(() => {});
+      return res.status(400).json({ message: 'حجم الملف أكبر من 50 ميجابايت.' });
+    }
+    if (validated.value.resourceType === 'summary') {
+      const signature = await getSupabaseObjectPrefix(storageKey, 5);
+      if (!hasPdfSignature(signature)) {
+        await deleteSupabaseObject(storageKey).catch(() => {});
+        return res.status(400).json({ message: 'الملخص لازم يكون ملف PDF صالح.' });
+      }
+    }
+
+    const files = getFilesCollection();
+    const existingFile = await files.findOne({ storageKey });
+    if (existingFile) {
+      if (String(existingFile.uploader) !== String(req.userId)) {
+        return res.status(409).json({ message: 'الملف ده اتسجل بالفعل.' });
+      }
+      return res.json(existingFile);
+    }
+
+    const { title, originalName, subject, resourceType, size, mimeType } = validated.value;
+    const savedFile = {
+      title,
+      originalName,
+      resourceType,
+      fileName: storageKey,
+      storageProvider: 'supabase',
+      storageKey,
+      subject: new ObjectId(subject),
+      uploader: new ObjectId(req.userId),
+      size,
+      mimeType,
+      createdAt: new Date(),
+      updatedAt: new Date()
+    };
+    const result = await files.insertOne(savedFile);
+    savedFile._id = result.insertedId;
+    return res.status(201).json(savedFile);
+  } catch (error) {
+    if (error.code === 'SUPABASE_STORAGE_NOT_CONFIGURED') {
+      return res.status(503).json({ message: 'تخزين Supabase مش متظبط على السيرفر.' });
+    }
+    if (Number(error.statusCode || error.status) === 404 || error.name === 'NotFound') {
+      return res.status(400).json({ message: 'الملف لسه موصلش للتخزين السحابي. استنى اكتمال الرفع وحاول تاني.' });
+    }
+    console.error('Could not save uploaded file details:', error);
+    return res.status(502).json({ message: 'الملف اترفع لكن مقدرناش نسجل بياناته. حاول تاني.' });
+  }
+}
+
+async function cancelFileUpload(req, res) {
+  const { storageKey } = req.body || {};
+  if (!isValidUploadKey(storageKey)) return res.status(400).json({ message: 'بيانات الملف المرفوع مش صالحة.' });
+  try {
+    const savedFile = await getFilesCollection().findOne({ storageKey });
+    if (savedFile) return res.status(409).json({ message: 'الملف اتسجل بالفعل ومش هيتحذف.' });
+    await deleteSupabaseObject(storageKey);
+    return res.json({ message: 'تم إلغاء رفع الملف.' });
+  } catch (error) {
+    if (error.code === 'SUPABASE_STORAGE_NOT_CONFIGURED') {
+      return res.status(503).json({ message: 'تخزين Supabase مش متظبط على السيرفر.' });
+    }
+    console.warn('Could not clean up an incomplete cloud upload:', error.message);
+    return res.status(502).json({ message: 'مقدرناش نمسح الملف المؤقت.' });
+  }
+}
+
 async function downloadFile(req, res) {
   try {
     if (!ObjectId.isValid(req.params.id)) return res.status(400).json({ message: 'رقم الملف غير صالح.' });
@@ -174,4 +311,4 @@ async function deleteFile(req, res) {
   }
 }
 
-export { getFiles, uploadFile, downloadFile, deleteFile };
+export { getFiles, uploadFile, createFileUploadUrl, completeFileUpload, cancelFileUpload, downloadFile, deleteFile };
