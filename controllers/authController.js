@@ -1,7 +1,20 @@
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { ObjectId } from 'mongodb';
+import { randomUUID } from 'node:crypto';
 import getUsers from '../models/User.js';
+import { deleteSupabaseObject, downloadSupabaseObject, uploadSupabaseObject } from '../config/supabaseStorage.js';
+
+const avatarTypes = {
+  'image/jpeg': { extension: '.jpg', signature: (buffer) => buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff },
+  'image/png': { extension: '.png', signature: (buffer) => buffer.length >= 8 && buffer.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) },
+  'image/webp': { extension: '.webp', signature: (buffer) => buffer.length >= 12 && buffer.toString('ascii', 0, 4) === 'RIFF' && buffer.toString('ascii', 8, 12) === 'WEBP' }
+};
+
+function storedAvatarUrl(user) {
+  if (user.avatarStorageKey) return `/api/auth/avatar/${user._id}?v=${user.avatarUpdatedAt?.getTime?.() || 0}`;
+  return user.avatarUrl || '';
+}
 
 function makeToken(user) {
   return jwt.sign({ id: String(user._id) }, process.env.JWT_SECRET, { expiresIn: '7d' });
@@ -14,7 +27,7 @@ function publicUser(user) {
     email: user.email,
     department: user.department,
     team: user.team,
-    avatarUrl: user.avatarUrl || '',
+    avatarUrl: storedAvatarUrl(user),
     role: user.role === 'admin' ? 'admin' : 'user'
   };
 }
@@ -105,20 +118,83 @@ async function updateProfile(req, res) {
 }
 
 async function updateProfileImage(req, res) {
+  let uploadedKey;
   try {
     if (!req.file) return res.status(400).json({ message: 'اختار صورة الأول.' });
     if (!ObjectId.isValid(req.userId)) return res.status(401).json({ message: 'سجّل دخولك تاني.' });
 
-    const avatarUrl = `/uploads/profiles/${req.file.filename}`;
-    const userId = new ObjectId(req.userId);
-    const result = await getUsers().updateOne({ _id: userId }, { $set: { avatarUrl, updatedAt: new Date() } });
-    if (!result.matchedCount) return res.status(404).json({ message: 'الحساب مش موجود.' });
+    const avatarType = avatarTypes[req.file.mimetype];
+    if (!avatarType || !avatarType.signature(req.file.buffer)) {
+      return res.status(400).json({ message: 'الصورة غير صالحة. اختار JPG أو PNG أو WEBP.' });
+    }
 
-    const user = await getUsers().findOne({ _id: userId }, { projection: { password: 0 } });
+    const userId = new ObjectId(req.userId);
+    const users = getUsers();
+    const currentUser = await users.findOne({ _id: userId }, { projection: { avatarStorageKey: 1 } });
+    if (!currentUser) return res.status(404).json({ message: 'الحساب مش موجود.' });
+
+    const previousAvatarKey = currentUser.avatarStorageKey;
+    uploadedKey = `profile-avatars/${userId}/${randomUUID()}${avatarType.extension}`;
+    const newAvatarKey = uploadedKey;
+    await uploadSupabaseObject({ key: newAvatarKey, body: req.file.buffer, contentType: req.file.mimetype });
+
+    const now = new Date();
+    const result = await users.updateOne({ _id: userId }, {
+      $set: {
+        avatarStorageKey: uploadedKey,
+        avatarMimeType: req.file.mimetype,
+        avatarUpdatedAt: now,
+        updatedAt: now
+      },
+      $unset: { avatarUrl: '' }
+    });
+    if (!result.matchedCount) {
+      await deleteSupabaseObject(uploadedKey).catch(() => {});
+      uploadedKey = null;
+      return res.status(404).json({ message: 'الحساب مش موجود.' });
+    }
+
+    uploadedKey = null;
+    if (previousAvatarKey && previousAvatarKey !== newAvatarKey) {
+      await deleteSupabaseObject(previousAvatarKey).catch((error) => {
+        console.warn(`Could not delete the previous profile image for ${userId}: ${error.message}`);
+      });
+    }
+
+    const user = await users.findOne({ _id: userId }, { projection: { password: 0 } });
     return res.json(publicUser(user));
   } catch (error) {
+    if (uploadedKey) await deleteSupabaseObject(uploadedKey).catch(() => {});
+    console.error(`Could not save profile image: ${error.message}`);
     return res.status(500).json({ message: 'مقدرناش نحفظ صورة البروفايل.' });
   }
 }
 
-export { register, login, getMe, updateProfile, updateProfileImage };
+async function getProfileAvatar(req, res) {
+  try {
+    if (!ObjectId.isValid(req.params.id)) return res.status(404).end();
+    const user = await getUsers().findOne(
+      { _id: new ObjectId(req.params.id) },
+      { projection: { avatarStorageKey: 1, avatarMimeType: 1 } }
+    );
+    if (!user?.avatarStorageKey) return res.status(404).end();
+
+    const image = await downloadSupabaseObject(user.avatarStorageKey);
+    if (!image) return res.status(404).end();
+    const contentType = avatarTypes[user.avatarMimeType]?.extension ? user.avatarMimeType : 'application/octet-stream';
+    if (contentType === 'application/octet-stream') return res.status(415).end();
+
+    res.set({
+      'Content-Type': contentType,
+      'Content-Length': String(image.contentLength),
+      'Cache-Control': 'public, max-age=3600',
+      'X-Content-Type-Options': 'nosniff'
+    });
+    return res.send(image.body);
+  } catch (error) {
+    console.error(`Could not load profile image: ${error.message}`);
+    return res.status(502).json({ message: 'مقدرناش نحمّل صورة البروفايل دلوقتي.' });
+  }
+}
+
+export { register, login, getMe, updateProfile, updateProfileImage, getProfileAvatar };

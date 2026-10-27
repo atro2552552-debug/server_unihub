@@ -6,17 +6,7 @@ import { fileURLToPath } from 'node:url';
 const currentDir = path.dirname(fileURLToPath(import.meta.url));
 const profileDir = path.join(currentDir, '../uploads/profiles');
 
-const storage = multer.diskStorage({
-  destination: (req, file, done) => {
-    fs.mkdirSync(profileDir, { recursive: true });
-    done(null, profileDir);
-  },
-  filename: (req, file, done) => {
-    const extensions = { 'image/jpeg': '.jpg', 'image/png': '.png', 'image/webp': '.webp' };
-    const extension = extensions[file.mimetype];
-    done(null, `${Date.now()}-${Math.round(Math.random() * 100000)}${extension}`);
-  }
-});
+fs.mkdirSync(profileDir, { recursive: true });
 
 function checkImage(req, file, done) {
   const imageTypes = ['image/jpeg', 'image/png', 'image/webp'];
@@ -25,7 +15,7 @@ function checkImage(req, file, done) {
 }
 
 const uploadProfileImage = multer({
-  storage,
+  storage: multer.memoryStorage(),
   fileFilter: checkImage,
   limits: { fileSize: 5 * 1024 * 1024 }
 });
