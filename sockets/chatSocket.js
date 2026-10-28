@@ -24,6 +24,8 @@ function addChatSocket(io) {
   });
 
   io.on('connection', (socket) => {
+    socket.join(`user:${socket.userId}`);
+
     socket.on('join-room', async (roomId) => {
       try {
         if (!ObjectId.isValid(roomId)) return socket.emit('chat-error', 'رقم الغرفة غير صالح.');

@@ -8,6 +8,7 @@ import authRoutes from './routes/authRoutes.js';
 import subjectRoutes from './routes/subjectRoutes.js';
 import roomRoutes from './routes/roomRoutes.js';
 import fileRoutes from './routes/fileRoutes.js';
+import notificationRoutes from './routes/notificationRoutes.js';
 import addChatSocket from './sockets/chatSocket.js';
 import dotenv from 'dotenv';
 import { profileDir } from './middlewares/profileUpload.js';
@@ -44,6 +45,8 @@ app.use('/api/auth', authRoutes);
 app.use('/api/subjects', subjectRoutes);
 app.use('/api/rooms', roomRoutes);
 app.use('/api/files', fileRoutes);
+app.use('/api/notifications', notificationRoutes);
+app.set('io', io);
 io.use((socket, next) => {
   if (!isAppReady) return next(new Error('السيرفر لسه بيجهز الاتصال بقاعدة البيانات.'));
   return next();
