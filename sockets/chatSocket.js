@@ -3,9 +3,11 @@ import { ObjectId } from 'mongodb';
 import getMessages from '../models/Message.js';
 import getRooms from '../models/Room.js';
 import getUsers from '../models/User.js';
+import { publicAvatarUser } from '../utils/avatar.js';
 
 async function addSender(message) {
-  const sender = await getUsers().findOne({ _id: message.sender }, { projection: { name: 1, avatarUrl: 1 } });
+  const senderRecord = await getUsers().findOne({ _id: message.sender }, { projection: { name: 1, avatarUrl: 1, avatarStorageKey: 1, avatarUpdatedAt: 1 } });
+  const sender = publicAvatarUser(senderRecord);
   return { ...message, sender };
 }
 

@@ -7,6 +7,7 @@ import getFilesCollection from '../models/File.js';
 import getSubjectsCollection from '../models/Subject.js';
 import getUsers from '../models/User.js';
 import { uploadSupabaseObject, createSupabaseUploadUrl, getSupabaseObjectInfo, getSupabaseObjectPrefix, downloadSupabaseObject, deleteSupabaseObject } from '../config/supabaseStorage.js';
+import { publicAvatarUser } from '../utils/avatar.js';
 
 const currentDir = path.dirname(fileURLToPath(import.meta.url));
 const MAX_FILE_SIZE = 50_000_000;
@@ -62,10 +63,11 @@ async function getFiles(req, res) {
       : {};
     const files = await getFilesCollection().find(filter).sort({ createdAt: -1 }).toArray();
     const result = await Promise.all(files.map(async (file) => {
-      const [subject, uploader] = await Promise.all([
+      const [subject, uploaderRecord] = await Promise.all([
         getSubjectsCollection().findOne({ _id: file.subject }),
-        getUsers().findOne({ _id: file.uploader }, { projection: { name: 1, avatarUrl: 1 } })
+        getUsers().findOne({ _id: file.uploader }, { projection: { name: 1, avatarUrl: 1, avatarStorageKey: 1, avatarUpdatedAt: 1 } })
       ]);
+      const uploader = publicAvatarUser(uploaderRecord);
       return { ...file, displayName: getDisplayName(file), subject, uploader };
     }));
     return res.json(result);

@@ -3,12 +3,14 @@ import getRoomsCollection from '../models/Room.js';
 import getMessages from '../models/Message.js';
 import getSubjects from '../models/Subject.js';
 import getUsers from '../models/User.js';
+import { publicAvatarUser } from '../utils/avatar.js';
 
 async function addRoomNames(room) {
-  const [subject, creator] = await Promise.all([
+  const [subject, creatorRecord] = await Promise.all([
     getSubjects().findOne({ _id: room.subject }),
-    getUsers().findOne({ _id: room.creator }, { projection: { name: 1, team: 1, avatarUrl: 1 } })
+    getUsers().findOne({ _id: room.creator }, { projection: { name: 1, team: 1, avatarUrl: 1, avatarStorageKey: 1, avatarUpdatedAt: 1 } })
   ]);
+  const creator = publicAvatarUser(creatorRecord);
 
   return { ...room, subject, creator };
 }
