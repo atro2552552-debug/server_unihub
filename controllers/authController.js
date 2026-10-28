@@ -87,6 +87,21 @@ async function getMe(req, res) {
   }
 }
 
+async function recordSessionActivity(req, res) {
+  try {
+    if (!ObjectId.isValid(req.userId)) return res.status(401).json({ message: 'سجّل دخولك تاني.' });
+    const lastLoginAt = new Date();
+    const result = await getUsers().updateOne(
+      { _id: new ObjectId(req.userId) },
+      { $set: { lastLoginAt } }
+    );
+    if (!result.matchedCount) return res.status(404).json({ message: 'الحساب مش موجود.' });
+    return res.json({ lastLoginAt });
+  } catch (error) {
+    return res.status(500).json({ message: 'مقدرناش نسجل وقت فتح التطبيق.' });
+  }
+}
+
 async function updateProfile(req, res) {
   try {
     const { name, email, department, team } = req.body;
@@ -197,4 +212,4 @@ async function getProfileAvatar(req, res) {
   }
 }
 
-export { register, login, getMe, updateProfile, updateProfileImage, getProfileAvatar };
+export { register, login, getMe, recordSessionActivity, updateProfile, updateProfileImage, getProfileAvatar };
