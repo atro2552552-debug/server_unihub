@@ -8,6 +8,7 @@ import getSubjectsCollection from '../models/Subject.js';
 import getUsers from '../models/User.js';
 import { uploadSupabaseObject, createSupabaseUploadUrl, getSupabaseObjectInfo, getSupabaseObjectPrefix, downloadSupabaseObject, deleteSupabaseObject } from '../config/supabaseStorage.js';
 import { publicAvatarUser } from '../utils/avatar.js';
+import { createFileUploadNotifications } from '../services/fileUploadNotifications.js';
 
 const currentDir = path.dirname(fileURLToPath(import.meta.url));
 const MAX_FILE_SIZE = 50_000_000;
@@ -54,6 +55,14 @@ function getDisplayName(file) {
 
 function hasPdfSignature(buffer) {
   return Buffer.isBuffer(buffer) && buffer.length >= 5 && buffer.subarray(0, 5).toString('ascii') === '%PDF-';
+}
+
+async function notifyOtherUsers(req, file) {
+  try {
+    await createFileUploadNotifications(file, req.userId, req.app.get('io'));
+  } catch (error) {
+    console.error('Could not notify users about the uploaded file:', error);
+  }
 }
 
 async function getFiles(req, res) {
@@ -118,6 +127,7 @@ async function uploadFile(req, res) {
     };
     const result = await getFilesCollection().insertOne(savedFile);
     savedFile._id = result.insertedId;
+    await notifyOtherUsers(req, savedFile);
 
     return res.status(201).json(savedFile);
   } catch (error) {
@@ -202,6 +212,7 @@ async function completeFileUpload(req, res) {
     };
     const result = await files.insertOne(savedFile);
     savedFile._id = result.insertedId;
+    await notifyOtherUsers(req, savedFile);
     return res.status(201).json(savedFile);
   } catch (error) {
     if (error.code === 'SUPABASE_STORAGE_NOT_CONFIGURED') {
